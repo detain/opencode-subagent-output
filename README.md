@@ -1,6 +1,6 @@
 # Subagent Reporter Plugin for OpenCode
 
-A tiny OpenCode plugin that makes subagents feel first-class in `opencode run --format default`.
+A tiny OpenCode plugin that gives subagents a voice when run with `opencode run --format default`. Allows for better manual review when run attended or unattended. 
 
 ## What it does
 
