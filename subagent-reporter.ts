@@ -43,7 +43,54 @@ function detectOutputMode(): "json" | "default" {
   return "default"
 }
 
+/**
+ * Decide whether it is safe to write our report lines to stdout.
+ *
+ * This reporter is only meaningful for the non-interactive `opencode run ...`
+ * command, whose stdout IS the transcript. In the interactive TUI the very
+ * same writes land in the raw terminal that opencode is actively drawing to
+ * and shred the rendered UI — so there we must stay completely silent.
+ *
+ * Observed process.argv (opencode 1.14.x):
+ *   run mode : ["bun", ".../src/index.js", "run", "<message>", ...]
+ *   TUI mode : ["bun", ".../src/cli/cmd/tui/worker.js"]   (loaded in a worker)
+ *
+ * Detection:
+ *   - SUBAGENT_REPORTER_ENABLED overrides everything ("1"/"true"/"on" to force
+ *     on, "0"/"false"/"off" to force off) for headless/serve setups that still
+ *     want the stream, or to silence it entirely.
+ *   - The TUI loads the plugin from a `.../tui/...` worker entry; never emit
+ *     there.
+ *   - Otherwise only enable when the `run` subcommand is present. Every other
+ *     mode (tui/serve/web/acp/...) either renders its own UI or emits its own
+ *     structured stream, so injecting plain lines would corrupt it.
+ */
+function isReportingEnabled(): boolean {
+  const env = process.env?.SUBAGENT_REPORTER_ENABLED?.toLowerCase()
+  if (env === "1" || env === "true" || env === "on") {
+    return true
+  }
+  if (env === "0" || env === "false" || env === "off") {
+    return false
+  }
+
+  const argv = Array.isArray(process.argv) ? process.argv : []
+
+  const entry = typeof argv[1] === "string" ? argv[1] : ""
+  if (entry.includes("/tui/")) {
+    return false
+  }
+
+  return argv.includes("run")
+}
+
 export default async function subagentStdoutReporter() {
+  if (!isReportingEnabled()) {
+    // Interactive TUI (or any non-`run` mode): register no hooks at all so we
+    // never touch a terminal opencode is rendering. Zero overhead, zero risk.
+    return {}
+  }
+
   const OUTPUT_MODE = detectOutputMode()
 
   let rootSessionID: string | undefined
