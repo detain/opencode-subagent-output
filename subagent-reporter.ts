@@ -17,7 +17,35 @@ function toTitleCase(value: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
+/**
+ * Detect how opencode is rendering its output so we don't corrupt it:
+ *   - "default": opencode prints human-readable text → we print plain lines.
+ *   - "json":    opencode prints one NDJSON event per line → we MUST emit our
+ *                own NDJSON events, or our plain lines break every consumer
+ *                that JSON.parse()s each line.
+ * Resolved from `--format json|--format=json` in argv, overridable via the
+ * SUBAGENT_REPORTER_FORMAT env var ("json" | "default").
+ */
+function detectOutputMode(): "json" | "default" {
+  const env = process.env?.SUBAGENT_REPORTER_FORMAT
+  if (env === "json" || env === "default") {
+    return env
+  }
+  const argv = Array.isArray(process.argv) ? process.argv : []
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--format=json") {
+      return "json"
+    }
+    if (argv[i] === "--format" && argv[i + 1] === "json") {
+      return "json"
+    }
+  }
+  return "default"
+}
+
 export default async function subagentStdoutReporter() {
+  const OUTPUT_MODE = detectOutputMode()
+
   let rootSessionID: string | undefined
 
   const sessions = new Map<string, SessionInfo>()
@@ -29,6 +57,21 @@ export default async function subagentStdoutReporter() {
   const toolStatus = new Map<string, string>()
   const lastToolSignatureBySession = new Map<string, string>()
   const finishedSessions = new Set<string>()
+
+  /**
+   * Emit one report line. In "json" mode it writes a single self-contained
+   * NDJSON event ({"type":"subagent",...}) so it interleaves cleanly with
+   * opencode's own NDJSON stream; consumers that don't recognize the type
+   * ignore it. In "default" mode it writes the original plain-text line.
+   * `fields` are the structured payload; `plain` is the exact legacy text.
+   */
+  function emit(subEvent: string, fields: Record<string, unknown>, plain: string) {
+    if (OUTPUT_MODE === "json") {
+      process.stdout.write(JSON.stringify({ type: "subagent", event: subEvent, ...fields }) + "\n")
+    } else {
+      process.stdout.write(plain.endsWith("\n") ? plain : plain + "\n")
+    }
+  }
 
   const BOLD = "\u001b[1m"
   const RESET = "\u001b[0m"
@@ -215,7 +258,11 @@ export default async function subagentStdoutReporter() {
             finishedSessions.add(statusSessionID)
             const info = subagents.get(statusSessionID)
             if (info) {
-              process.stdout.write(`**** [${info.agentName.toUpperCase()} FINISHED] ****\n`)
+              emit(
+                "finished",
+                { agent: info.agentName, n: info.instanceNum },
+                `**** [${info.agentName.toUpperCase()} FINISHED] ****`,
+              )
             }
           }
         }
@@ -232,6 +279,9 @@ export default async function subagentStdoutReporter() {
       if (!prefix) {
         return
       }
+      const info = subagents.get(sessionID)
+      const agentName = info?.agentName ?? "Subagent"
+      const instanceNum = info?.instanceNum ?? 1
 
       if (part.type === "tool") {
         const key = String(part.id)
@@ -245,7 +295,11 @@ export default async function subagentStdoutReporter() {
           const prevSignature = lastToolSignatureBySession.get(sessionID)
           if (prevSignature !== signature) {
             const detailText = detail ? ` ${BOLD}${detail}${RESET}` : ""
-            process.stdout.write(`${prefix}-> ${part.tool}${detailText}\n`)
+            emit(
+              "tool",
+              { agent: agentName, n: instanceNum, tool: String(part.tool), detail: detail ?? "", status: nextStatus },
+              `${prefix}-> ${part.tool}${detailText}`,
+            )
             lastToolSignatureBySession.set(sessionID, signature)
           }
         }
@@ -263,7 +317,7 @@ export default async function subagentStdoutReporter() {
           return
         }
         printedText.add(key)
-        process.stdout.write(`${prefix}${text}\n`)
+        emit("text", { agent: agentName, n: instanceNum, text }, `${prefix}${text}`)
         return
       }
 
@@ -278,7 +332,7 @@ export default async function subagentStdoutReporter() {
           return
         }
         printedReasoning.add(key)
-        process.stdout.write(`${prefix}Thinking: ${text}\n`)
+        emit("reasoning", { agent: agentName, n: instanceNum, text }, `${prefix}Thinking: ${text}`)
       }
     },
   }
