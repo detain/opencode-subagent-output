@@ -1,6 +1,8 @@
 # Subagent Reporter Plugin for OpenCode
 
-A tiny OpenCode plugin that gives subagents a voice when run with `opencode run --format default`. Allows for better manual review when run attended or unattended. 
+A tiny OpenCode plugin that gives subagents a voice when run with `opencode run --format default`. Allows for better manual review when run attended or unattended.
+
+**Supports both OpenCode V1 and OpenCode V2 from a single file.** The plugin exports a V2 `Plugin.define({ id, setup })` definition plus a V1 `server()` method, so the same file loads on V2 (which reads `id`/`setup`) and on V1 `>= 1.18.29` (which calls `server()`). Each version's event stream is adapted to the shared reporting core, so output is identical on both.
 
 ## What it does
 
@@ -16,19 +18,34 @@ When prompts fan out into multiple subagents, default CLI output can feel opaque
 
 ## Install
 
-1. Put the plugin file at:
+The plugin imports `@opencode/plugin`, so it needs that package resolvable. Two options:
 
-`~/.config/opencode/plugins/subagent-reporter.ts`
+**Option A — as an npm package (recommended for V2):**
 
-2. Make sure your global config exists at:
+1. Add it to the `plugins` array in `~/.config/opencode/opencode.json` (V2) or `plugin` array (V1):
 
-`~/.config/opencode/opencode.json`
+```json
+{ "plugins": ["opencode-subagent-output"] }
+```
 
+2. Run normally:
+
+`opencode run "your prompt" --format default`
+
+**Option B — local file:**
+
+1. Put the plugin file at `~/.config/opencode/plugins/subagent-reporter.ts` (V2 discovers `plugins/`; V1 also reads `plugin/`).
+2. Make sure `@opencode/plugin` is installed where the file can resolve it (e.g. `npm i @opencode/plugin` in that directory).
 3. Run normally:
 
 `opencode run "your prompt" --format default`
 
-That is it. No npm plugin entry is needed when loading from the local plugins directory.
+That is it. No other configuration is needed.
+
+### Environment variables
+
+- `SUBAGENT_REPORTER_FORMAT` — force `json` or `default` output (auto-detected from `--format json` otherwise).
+- `SUBAGENT_REPORTER_ENABLED` — force `1`/`true`/`on` to always report, or `0`/`false`/`off` to silence. By default it only reports in `opencode run` mode and stays silent in the TUI.
 
 ## Example output
 

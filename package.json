@@ -1,0 +1,13 @@
+{
+  "name": "opencode-subagent-output",
+  "version": "1.1.0",
+  "description": "OpenCode plugin that streams subagent progress to stdout during `opencode run` (supports OpenCode V1 and V2).",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./subagent-reporter.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.0"
+  }
+}

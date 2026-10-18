@@ -1,3 +1,20 @@
+/**
+ * Subagent Reporter — an OpenCode plugin that gives subagents a voice when run
+ * with `opencode run ...`. It streams subagent progress to stdout, prefixes each
+ * line with the agent name + instance number, shows tool activity with useful
+ * details, dedupes repeated identical tool calls, and prints a finish marker.
+ *
+ * This file supports BOTH OpenCode V1 and OpenCode V2 from a single default
+ * export:
+ *   - V1 (>= 1.18.29) loads the `server()` method and uses the hooks it returns.
+ *   - V2 reads the `id` + `setup(ctx)` (produced by `Plugin.define`) and ignores
+ *     `server()`.
+ * The two implementations share one state/reporting core (`makeState`); only the
+ * event-shape adapters differ, because V2 renamed the event stream and moved the
+ * payload from `event.properties` to `event.data`.
+ */
+import { Plugin } from "@opencode/plugin"
+
 type SessionInfo = {
   parentID?: string
   agent?: string
@@ -51,11 +68,7 @@ function detectOutputMode(): "json" | "default" {
  * same writes land in the raw terminal that opencode is actively drawing to
  * and shred the rendered UI — so there we must stay completely silent.
  *
- * Observed process.argv (opencode 1.14.x):
- *   run mode : ["bun", ".../src/index.js", "run", "<message>", ...]
- *   TUI mode : ["bun", ".../src/cli/cmd/tui/worker.js"]   (loaded in a worker)
- *
- * Detection:
+ * Detection (works for both V1 and V2):
  *   - SUBAGENT_REPORTER_ENABLED overrides everything ("1"/"true"/"on" to force
  *     on, "0"/"false"/"off" to force off) for headless/serve setups that still
  *     want the stream, or to silence it entirely.
@@ -84,13 +97,13 @@ function isReportingEnabled(): boolean {
   return argv.includes("run")
 }
 
-export default async function subagentStdoutReporter() {
-  if (!isReportingEnabled()) {
-    // Interactive TUI (or any non-`run` mode): register no hooks at all so we
-    // never touch a terminal opencode is rendering. Zero overhead, zero risk.
-    return {}
-  }
-
+/**
+ * The shared reporting core. Both the V1 and V2 adapters normalize their
+ * version-specific events into these plain callbacks, so all of the session
+ * tree tracking, instance numbering, dedup, and stdout formatting lives here
+ * exactly once.
+ */
+function makeState() {
   const OUTPUT_MODE = detectOutputMode()
 
   let rootSessionID: string | undefined
@@ -105,12 +118,14 @@ export default async function subagentStdoutReporter() {
   const lastToolSignatureBySession = new Map<string, string>()
   const finishedSessions = new Set<string>()
 
+  const BOLD = "\u001b[1m"
+  const RESET = "\u001b[0m"
+
   /**
    * Emit one report line. In "json" mode it writes a single self-contained
    * NDJSON event ({"type":"subagent",...}) so it interleaves cleanly with
    * opencode's own NDJSON stream; consumers that don't recognize the type
    * ignore it. In "default" mode it writes the original plain-text line.
-   * `fields` are the structured payload; `plain` is the exact legacy text.
    */
   function emit(subEvent: string, fields: Record<string, unknown>, plain: string) {
     if (OUTPUT_MODE === "json") {
@@ -120,23 +135,18 @@ export default async function subagentStdoutReporter() {
     }
   }
 
-  const BOLD = "\u001b[1m"
-  const RESET = "\u001b[0m"
-
   function isDescendantOfRoot(sessionID: string | undefined) {
     if (!sessionID || !rootSessionID) {
       return false
     }
-
     if (sessionID === rootSessionID) {
       return true
     }
-
     let cursor: string | undefined = sessionID
     const seen = new Set<string>()
     while (cursor && !seen.has(cursor)) {
       seen.add(cursor)
-      const parentID = sessions.get(cursor)?.parentID
+      const parentID: string | undefined = sessions.get(cursor)?.parentID
       if (!parentID) {
         return false
       }
@@ -145,7 +155,6 @@ export default async function subagentStdoutReporter() {
       }
       cursor = parentID
     }
-
     return false
   }
 
@@ -153,17 +162,15 @@ export default async function subagentStdoutReporter() {
     let depth = 0
     let cursor: string | undefined = sessionID
     const seen = new Set<string>()
-
     while (cursor && !seen.has(cursor)) {
       seen.add(cursor)
-      const parentID = sessions.get(cursor)?.parentID
+      const parentID: string | undefined = sessions.get(cursor)?.parentID
       if (!parentID || parentID === rootSessionID) {
         return depth + 1
       }
       depth += 1
       cursor = parentID
     }
-
     return depth + 1
   }
 
@@ -171,7 +178,6 @@ export default async function subagentStdoutReporter() {
     if (!rootSessionID || sessionID === rootSessionID) {
       return
     }
-
     const session = sessions.get(sessionID)
     if (!session?.parentID || !isDescendantOfRoot(sessionID)) {
       return
@@ -185,7 +191,6 @@ export default async function subagentStdoutReporter() {
       if (!info) {
         return
       }
-
       if (info.agentName !== agentName) {
         const nextCount = (instanceCounter.get(parentKey) ?? 0) + 1
         instanceCounter.set(parentKey, nextCount)
@@ -248,11 +253,135 @@ export default async function subagentStdoutReporter() {
       return getField(input, ["filePath", "path"])
     }
 
-    return (
-      getField(input, ["description", "name", "filePath", "path", "pattern", "query", "url", "prompt", "command"]) ??
-      undefined
-    )
+    return getField(input, ["description", "name", "filePath", "path", "pattern", "query", "url", "prompt", "command"])
   }
+
+  /** True when this session is a tracked subagent we should report on. */
+  function isReportable(sessionID: string | undefined): sessionID is string {
+    return !!sessionID && isDescendantOfRoot(sessionID) && subagents.has(sessionID)
+  }
+
+  function onSessionCreated(id: string, parentID: string | undefined) {
+    if (!id) {
+      return
+    }
+    sessions.set(id, { parentID })
+    if (!rootSessionID && !parentID) {
+      rootSessionID = id
+      return
+    }
+    assignSubagentInfo(id)
+  }
+
+  function onAgentUpdated(sessionID: string | undefined, agent: string | undefined) {
+    if (!sessionID) {
+      return
+    }
+    const session = sessions.get(sessionID)
+    if (!session) {
+      sessions.set(sessionID, { agent })
+    } else if (!session.agent && agent) {
+      session.agent = agent
+    }
+    assignSubagentInfo(sessionID)
+  }
+
+  function onTool(sessionID: string | undefined, toolID: string, tool: string, input: unknown) {
+    if (!isReportable(sessionID)) {
+      return
+    }
+    const key = String(toolID)
+    const nextStatus = "running"
+    const prevStatus = toolStatus.get(key)
+    if (nextStatus === prevStatus) {
+      return
+    }
+    toolStatus.set(key, nextStatus)
+
+    const prefix = prefixFor(sessionID)
+    if (!prefix) {
+      return
+    }
+    const info = subagents.get(sessionID)
+    const agentName = info?.agentName ?? "Subagent"
+    const instanceNum = info?.instanceNum ?? 1
+
+    const detail = summarizeToolInput(String(tool), input)
+    const signature = `${tool}|${detail ?? ""}`
+    const prevSignature = lastToolSignatureBySession.get(sessionID)
+    if (prevSignature === signature) {
+      return
+    }
+    const detailText = detail ? ` ${BOLD}${detail}${RESET}` : ""
+    emit(
+      "tool",
+      { agent: agentName, n: instanceNum, tool: String(tool), detail: detail ?? "", status: nextStatus },
+      `${prefix}-> ${tool}${detailText}`,
+    )
+    lastToolSignatureBySession.set(sessionID, signature)
+  }
+
+  function onText(sessionID: string | undefined, partID: string, text: string) {
+    if (!isReportable(sessionID)) {
+      return
+    }
+    lastToolSignatureBySession.delete(sessionID)
+    const trimmed = String(text ?? "").trim()
+    if (!trimmed) {
+      return
+    }
+    const key = `${partID}:${trimmed.length}`
+    if (printedText.has(key)) {
+      return
+    }
+    printedText.add(key)
+    const prefix = prefixFor(sessionID)
+    const info = subagents.get(sessionID)
+    emit("text", { agent: info?.agentName, n: info?.instanceNum, text: trimmed }, `${prefix}${trimmed}`)
+  }
+
+  function onReasoning(sessionID: string | undefined, partID: string, text: string) {
+    if (!isReportable(sessionID)) {
+      return
+    }
+    lastToolSignatureBySession.delete(sessionID)
+    const trimmed = String(text ?? "").trim()
+    if (!trimmed) {
+      return
+    }
+    const key = `${partID}:${trimmed.length}`
+    if (printedReasoning.has(key)) {
+      return
+    }
+    printedReasoning.add(key)
+    const prefix = prefixFor(sessionID)
+    const info = subagents.get(sessionID)
+    emit("reasoning", { agent: info?.agentName, n: info?.instanceNum, text: trimmed }, `${prefix}Thinking: ${trimmed}`)
+  }
+
+  function onFinished(sessionID: string | undefined) {
+    if (!sessionID || !subagents.has(sessionID) || finishedSessions.has(sessionID)) {
+      return
+    }
+    finishedSessions.add(sessionID)
+    const info = subagents.get(sessionID)
+    if (info) {
+      emit("finished", { agent: info.agentName, n: info.instanceNum }, `**** [${info.agentName.toUpperCase()} FINISHED] ****`)
+    }
+  }
+
+  return { onSessionCreated, onAgentUpdated, onTool, onText, onReasoning, onFinished }
+}
+
+/**
+ * V1 adapter: OpenCode V1's `event` hook delivers `{ type, properties }`.
+ * Returns the V1 hooks object consumed by the `server()` entrypoint.
+ */
+function v1Hooks() {
+  if (!isReportingEnabled()) {
+    return {}
+  }
+  const state = makeState()
 
   return {
     event: async ({ event }: { event: any }) => {
@@ -261,17 +390,7 @@ export default async function subagentStdoutReporter() {
         if (!info?.id) {
           return
         }
-
-        sessions.set(info.id, {
-          parentID: info.parentID,
-        })
-
-        if (!rootSessionID && !info.parentID) {
-          rootSessionID = info.id
-          return
-        }
-
-        assignSubagentInfo(info.id)
+        state.onSessionCreated(info.id, info.parentID)
         return
       }
 
@@ -280,107 +399,115 @@ export default async function subagentStdoutReporter() {
         if (!info?.sessionID || info.role !== "assistant") {
           return
         }
-
-        const session = sessions.get(info.sessionID)
-        if (!session) {
-          sessions.set(info.sessionID, { agent: info.agent })
-        } else if (!session.agent && info.agent) {
-          session.agent = info.agent
-        }
-
-        assignSubagentInfo(info.sessionID)
+        // V1 carries the agent name on assistant messages; register it so the
+        // session tree (built from session.created) can label subagents.
+        state.onAgentUpdated(info.sessionID, info.agent)
         return
       }
 
-      if (event.type !== "message.part.updated") {
-        if (event.type === "session.status") {
-          const statusSessionID = event.properties?.sessionID
-          const statusType = event.properties?.status?.type
-          if (
-            statusSessionID &&
-            statusType === "idle" &&
-            subagents.has(statusSessionID) &&
-            !finishedSessions.has(statusSessionID)
-          ) {
-            finishedSessions.add(statusSessionID)
-            const info = subagents.get(statusSessionID)
-            if (info) {
-              emit(
-                "finished",
-                { agent: info.agentName, n: info.instanceNum },
-                `**** [${info.agentName.toUpperCase()} FINISHED] ****`,
-              )
-            }
+      if (event.type === "message.part.updated") {
+        const part = event.properties?.part
+        const sessionID = part?.sessionID
+        if (!sessionID) {
+          return
+        }
+        if (part?.type === "tool") {
+          // V1 re-sends the part on every state change; the core dedupes by
+          // (tool id, status) and by signature, so only the first "running"
+          // and the first "completed" of a new call produce output.
+          const nextStatus = String(part.state?.status ?? "")
+          if (nextStatus === "running" || nextStatus === "completed") {
+            state.onTool(sessionID, part.id, String(part.tool), part.state?.input)
           }
-        }
-        return
-      }
-
-      const part = event.properties?.part
-      const sessionID = part?.sessionID
-      if (!sessionID || !isDescendantOfRoot(sessionID) || !subagents.has(sessionID)) {
-        return
-      }
-
-      const prefix = prefixFor(sessionID)
-      if (!prefix) {
-        return
-      }
-      const info = subagents.get(sessionID)
-      const agentName = info?.agentName ?? "Subagent"
-      const instanceNum = info?.instanceNum ?? 1
-
-      if (part.type === "tool") {
-        const key = String(part.id)
-        const nextStatus = String(part.state?.status ?? "")
-        const prevStatus = toolStatus.get(key)
-
-        if (nextStatus && nextStatus !== prevStatus && (nextStatus === "running" || nextStatus === "completed")) {
-          toolStatus.set(key, nextStatus)
-          const detail = summarizeToolInput(String(part.tool), part.state?.input)
-          const signature = `${part.tool}|${detail ?? ""}`
-          const prevSignature = lastToolSignatureBySession.get(sessionID)
-          if (prevSignature !== signature) {
-            const detailText = detail ? ` ${BOLD}${detail}${RESET}` : ""
-            emit(
-              "tool",
-              { agent: agentName, n: instanceNum, tool: String(part.tool), detail: detail ?? "", status: nextStatus },
-              `${prefix}-> ${part.tool}${detailText}`,
-            )
-            lastToolSignatureBySession.set(sessionID, signature)
-          }
-        }
-        return
-      }
-
-      if (part.type === "text" && part.time?.end) {
-        lastToolSignatureBySession.delete(sessionID)
-        const text = String(part.text ?? "").trim()
-        if (!text) {
           return
         }
-        const key = `${part.id}:${part.time.end}`
-        if (printedText.has(key)) {
+        if (part?.type === "text" && part.time?.end) {
+          state.onText(sessionID, part.id, part.text)
           return
         }
-        printedText.add(key)
-        emit("text", { agent: agentName, n: instanceNum, text }, `${prefix}${text}`)
+        if (part?.type === "reasoning" && part.time?.end) {
+          state.onReasoning(sessionID, part.id, part.text)
+        }
         return
       }
 
-      if (part.type === "reasoning" && part.time?.end) {
-        lastToolSignatureBySession.delete(sessionID)
-        const text = String(part.text ?? "").trim()
-        if (!text) {
-          return
+      if (event.type === "session.status") {
+        const statusSessionID = event.properties?.sessionID
+        const statusType = event.properties?.status?.type
+        if (statusType === "idle") {
+          state.onFinished(statusSessionID)
         }
-        const key = `${part.id}:${part.time.end}`
-        if (printedReasoning.has(key)) {
-          return
-        }
-        printedReasoning.add(key)
-        emit("reasoning", { agent: agentName, n: instanceNum, text }, `${prefix}Thinking: ${text}`)
       }
     },
   }
+}
+
+/**
+ * V2 adapter: OpenCode V2's `ctx.event.subscribe()` yields `{ type, data }`.
+ * V2 renamed the event stream (no `message.*` events) and moved the payload
+ * from `properties` to `data`. This maps those onto the shared core.
+ */
+function v2Setup(ctx: any) {
+  if (!isReportingEnabled()) {
+    // Interactive TUI (or any non-`run` mode): subscribe to nothing so we
+    // never touch a terminal opencode is rendering.
+    return () => {}
+  }
+  const state = makeState()
+  // Tool names arrive on `session.tool.input.started` (data.name) and the tool
+  // input arrives on `session.tool.called` (data.input); join them by tool id.
+  const toolNameByID = new Map<string, string>()
+
+  const controller = new AbortController()
+  void (async () => {
+    for await (const raw of ctx.event.subscribe({ signal: controller.signal })) {
+      const event = raw as any
+      const data = event?.data ?? {}
+      switch (event?.type) {
+        case "session.created":
+          state.onSessionCreated(data.id, data.parentID)
+          break
+        case "session.step.started":
+          state.onAgentUpdated(data.sessionID, data.agent)
+          break
+        case "session.tool.input.started":
+          if (data.id) {
+            toolNameByID.set(String(data.id), String(data.name ?? ""))
+          }
+          break
+        case "session.tool.called":
+          if (data.id && data.sessionID) {
+            const name = toolNameByID.get(String(data.id)) ?? String(data.input?.name ?? "")
+            state.onTool(data.sessionID, data.id, name, data.input)
+          }
+          break
+        case "session.text.ended":
+          state.onText(data.sessionID, data.assistantMessageID, data.text)
+          break
+        case "session.reasoning.ended":
+          state.onReasoning(data.sessionID, data.assistantMessageID, data.text)
+          break
+        case "session.execution.succeeded":
+        case "session.execution.failed":
+        case "session.execution.interrupted":
+          state.onFinished(data.sessionID)
+          break
+      }
+    }
+  })().catch(() => {
+    /* stream closed; nothing to do */
+  })
+
+  return () => controller.abort()
+}
+
+// V2 default export: `id` + `setup` (from Plugin.define) plus the V1 `server()`
+// method. V2 reads `id`/`setup` and ignores `server()`; V1 (>= 1.18.29) calls
+// `server()` and ignores `setup`.
+export default {
+  ...Plugin.define({
+    id: "subagent-reporter",
+    setup: v2Setup,
+  }),
+  server: () => v1Hooks(),
 }
