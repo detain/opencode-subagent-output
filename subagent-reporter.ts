@@ -14,6 +14,7 @@
  * payload from `event.properties` to `event.data`.
  */
 import { Plugin } from "@opencode/plugin"
+import { appendFileSync } from "node:fs"
 
 type SessionInfo = {
   parentID?: string
@@ -153,10 +154,17 @@ function makeState() {
    * NDJSON stream; consumers that don't recognize the type ignore it. In
    * "default" mode we write the original plain-text line.
    *
-   * V2: the plugin runs in a separate server process. In `--standalone` mode
-   * that server's stdout is /dev/null and only its STDERR is forwarded to the
-   * terminal, so we write to stderr there (both plain and json modes). This is
-   * why V2 reporting requires `--standalone` + `SUBAGENT_REPORTER_ENABLED=1`.
+   * Output destination, in priority order:
+   *   1. `SUBAGENT_REPORTER_OUT=<file>` — append the line to that file. This is
+   *      the cleanest V2 transport: the server process can always write a file,
+   *      so it works in default mode (no `--standalone`/`--print-logs`, no log
+   *      noise). A wrapper script tails the file onto the terminal (see
+   *      `scripts/opencode-pipe-subagents.sh`).
+   *   2. V2 without a file — stderr. The server's stdout is /dev/null and only
+   *      its stderr reaches the terminal, and only under `--standalone
+   *      --print-logs`.
+   *   3. V1 — stdout (`opencode run` is one process whose stdout is the
+   *      transcript).
    */
   function emit(subEvent: string, fields: Record<string, unknown>, plain: string) {
     const line =
@@ -165,6 +173,15 @@ function makeState() {
         : plain.endsWith("\n")
           ? plain
           : plain + "\n"
+    const outFile = process.env?.SUBAGENT_REPORTER_OUT
+    if (outFile) {
+      try {
+        appendFileSync(outFile, line)
+      } catch {
+        /* fall through to stream */
+      }
+      return
+    }
     const stream = isV2() ? process.stderr : process.stdout
     stream.write(line)
   }

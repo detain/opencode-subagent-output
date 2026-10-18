@@ -46,27 +46,57 @@ That is it. No other configuration is needed.
 
 V2 changed the process model: `opencode run` is a thin **client** to a separate
 **server** process, and the plugin loads in that server. The server's stdout is
-`/dev/null`, and its stderr only reaches the terminal when the run is
-`--standalone` (a private child server) **and** `--print-logs` is set. The
-plugin detects V2 and writes its report lines to stderr accordingly.
-
-So on V2, run with:
+`/dev/null`, so the plugin cannot write straight to your terminal the way it
+could on V1. Plugins also cannot add new CLI flags (the flag set is static in
+the binary). The clean solution is the bundled wrapper, which makes a
+`--pipe-subagents` flag work as if it were native:
 
 ```sh
+scripts/opencode-pipe-subagents.sh "your prompt" --pipe-subagents
+```
+
+It strips `--pipe-subagents`, points the plugin at a temp file
+(`SUBAGENT_REPORTER_OUT`), and tails that file onto stdout in parallel with the
+run's own transcript. The file transport works from the server process in
+**default mode** — no `--standalone`, no `--print-logs`, no server log noise.
+It auto-detects `--format json` and emits NDJSON
+`{"type":"subagent",...}` events. Without `--pipe-subagents` it is a
+transparent pass-through to `opencode run`.
+
+Make it feel native with an alias (put in `~/.zshrc`):
+
+```sh
+alias opencode-pipe='scripts/opencode-pipe-subagents.sh'
+# then:  opencode-pipe "prompt" --pipe-subagents
+```
+
+If `opencode` is not on the wrapper's PATH, set `OPENCODE_BIN=/path/to/opencode`.
+
+#### Manual (no wrapper)
+
+You can drive the plugin directly with environment variables:
+
+```sh
+# Plain text, via the server's stderr (needs --standalone --print-logs):
 SUBAGENT_REPORTER_ENABLED=1 opencode run "your prompt" \
-  --format default --standalone --print-logs
+  --format default --standalone --print-logs 2>&1 | grep -vE '^timestamp='
+
+# Or to a file (works in default mode, no special flags):
+SUBAGENT_REPORTER_ENABLED=1 SUBAGENT_REPORTER_OUT=/tmp/subagents.txt \
+  opencode run "your prompt" --format default
+# then:  cat /tmp/subagents.txt
 ```
 
 - `SUBAGENT_REPORTER_ENABLED=1` — required on V2. The server process is shared
   with the TUI and cannot tell `run` mode from TUI mode, so reporting is opt-in.
   (On V1 it is optional: `run` mode is auto-detected.)
-- `--standalone --print-logs` — required on V2 for the server's stderr to reach
-  your terminal. `--print-logs` also dumps the server's own log lines to
-  stderr; filter them with `grep -vE '^(timestamp=|\[SR)'` if you want only the
-  report. `--log-level none` does not help — the log lines bypass the level gate.
-- For `--format json`, also set `SUBAGENT_REPORTER_FORMAT=json` — the server
-  process cannot see the client's `--format` flag, so auto-detection is off and
-  the env var is the only way to get NDJSON `{"type":"subagent",...}` events.
+- `SUBAGENT_REPORTER_OUT=<file>` — write report lines to a file. The cleanest
+  V2 transport (default mode, no log noise). This is what the wrapper uses.
+- Without a file, V2 writes to stderr, which only reaches the terminal under
+  `--standalone --print-logs` (and that flag also dumps the server's own log
+  lines — filter with `grep -vE '^timestamp='`).
+- For `--format json`, set `SUBAGENT_REPORTER_FORMAT=json` — the server process
+  cannot see the client's `--format` flag (the wrapper does this for you).
 
 ### Environment variables
 
@@ -76,6 +106,8 @@ SUBAGENT_REPORTER_ENABLED=1 opencode run "your prompt" \
 - `SUBAGENT_REPORTER_ENABLED` — force `1`/`true`/`on` to always report, or
   `0`/`false`/`off` to silence. On V1 it defaults to "report in `opencode run`
   mode only, silent in the TUI". On V2 it defaults to off (opt-in required).
+- `SUBAGENT_REPORTER_OUT` — path to a file to append report lines to (V2).
+  Takes priority over stdout/stderr. Used by the `--pipe-subagents` wrapper.
 
 ## Example output
 
