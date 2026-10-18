@@ -61,22 +61,28 @@ function detectOutputMode(): "json" | "default" {
 }
 
 /**
- * Decide whether it is safe to write our report lines to stdout.
+ * Decide whether it is safe to write our report lines to the terminal.
  *
  * This reporter is only meaningful for the non-interactive `opencode run ...`
- * command, whose stdout IS the transcript. In the interactive TUI the very
- * same writes land in the raw terminal that opencode is actively drawing to
- * and shred the rendered UI — so there we must stay completely silent.
+ * command. In the interactive TUI the very same writes land in the raw
+ * terminal that opencode is actively drawing to and shred the rendered UI — so
+ * there we must stay completely silent.
  *
- * Detection (works for both V1 and V2):
- *   - SUBAGENT_REPORTER_ENABLED overrides everything ("1"/"true"/"on" to force
- *     on, "0"/"false"/"off" to force off) for headless/serve setups that still
- *     want the stream, or to silence it entirely.
- *   - The TUI loads the plugin from a `.../tui/...` worker entry; never emit
- *     there.
- *   - Otherwise only enable when the `run` subcommand is present. Every other
- *     mode (tui/serve/web/acp/...) either renders its own UI or emits its own
- *     structured stream, so injecting plain lines would corrupt it.
+ * The `SUBAGENT_REPORTER_ENABLED` env var ("1"/"true"/"on" to force on,
+ * "0"/"false"/"off" to force off) always wins.
+ *
+ * When the env var is unset the two versions differ, because of where the
+ * plugin runs:
+ *   - V1: `opencode run` is a single process, so the plugin's argv DOES contain
+ *     `run` and we can auto-detect it. Enable only in `run` mode, never in the
+ *     TUI (whose worker entry path contains `/tui/`).
+ *   - V2: `opencode run` is a thin client talking to a SEPARATE server process,
+ *     and the plugin loads in that server. The server's argv is
+ *     `serve --service` (no `run`), and the same server is shared by the TUI,
+ *     so it cannot tell run-mode from TUI-mode. Auto-enabling would corrupt the
+ *     TUI, so in V2 we stay silent unless the caller explicitly opts in with
+ *     `SUBAGENT_REPORTER_ENABLED=1` (which also routes output to stderr, the
+ *     only stream the `--standalone` server forwards to the terminal).
  */
 function isReportingEnabled(): boolean {
   const env = process.env?.SUBAGENT_REPORTER_ENABLED?.toLowerCase()
@@ -84,6 +90,11 @@ function isReportingEnabled(): boolean {
     return true
   }
   if (env === "0" || env === "false" || env === "off") {
+    return false
+  }
+
+  if (isV2()) {
+    // V2 server process: no reliable run/TUI signal. Require explicit opt-in.
     return false
   }
 
@@ -95,6 +106,18 @@ function isReportingEnabled(): boolean {
   }
 
   return argv.includes("run")
+}
+
+/**
+ * True when we are loaded by OpenCode V2 (the server-process model). V2's
+ * `@opencode/plugin` exposes `Plugin.define`; V1's does not.
+ */
+function isV2(): boolean {
+  try {
+    return typeof (Plugin as any)?.define === "function"
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -122,17 +145,28 @@ function makeState() {
   const RESET = "\u001b[0m"
 
   /**
-   * Emit one report line. In "json" mode it writes a single self-contained
-   * NDJSON event ({"type":"subagent",...}) so it interleaves cleanly with
-   * opencode's own NDJSON stream; consumers that don't recognize the type
-   * ignore it. In "default" mode it writes the original plain-text line.
+   * Emit one report line.
+   *
+   * V1: `opencode run` is one process whose stdout IS the transcript, so we
+   * write to stdout. In "json" mode we emit a self-contained NDJSON event
+   * ({type:"subagent",...}) so it interleaves cleanly with opencode's own
+   * NDJSON stream; consumers that don't recognize the type ignore it. In
+   * "default" mode we write the original plain-text line.
+   *
+   * V2: the plugin runs in a separate server process. In `--standalone` mode
+   * that server's stdout is /dev/null and only its STDERR is forwarded to the
+   * terminal, so we write to stderr there (both plain and json modes). This is
+   * why V2 reporting requires `--standalone` + `SUBAGENT_REPORTER_ENABLED=1`.
    */
   function emit(subEvent: string, fields: Record<string, unknown>, plain: string) {
-    if (OUTPUT_MODE === "json") {
-      process.stdout.write(JSON.stringify({ type: "subagent", event: subEvent, ...fields }) + "\n")
-    } else {
-      process.stdout.write(plain.endsWith("\n") ? plain : plain + "\n")
-    }
+    const line =
+      OUTPUT_MODE === "json"
+        ? JSON.stringify({ type: "subagent", event: subEvent, ...fields }) + "\n"
+        : plain.endsWith("\n")
+          ? plain
+          : plain + "\n"
+    const stream = isV2() ? process.stderr : process.stdout
+    stream.write(line)
   }
 
   function isDescendantOfRoot(sessionID: string | undefined) {
@@ -269,6 +303,17 @@ function makeState() {
     if (!rootSessionID && !parentID) {
       rootSessionID = id
       return
+    }
+    // In V2 the root session's `session.created` often never reaches the
+    // plugin (the `run` client creates the root before the server-side
+    // subscription starts). The first subagent we see therefore carries a
+    // `parentID` for a session we have not registered as root. Adopt that
+    // parent as the root so the descendant walk works.
+    if (!rootSessionID && parentID) {
+      rootSessionID = parentID
+      if (!sessions.has(parentID)) {
+        sessions.set(parentID, { parentID: undefined })
+      }
     }
     assignSubagentInfo(id)
   }
@@ -465,7 +510,8 @@ function v2Setup(ctx: any) {
       const data = event?.data ?? {}
       switch (event?.type) {
         case "session.created":
-          state.onSessionCreated(data.id, data.parentID)
+          // V2 carries the new session's id on `data.sessionID` (V1 used `id`).
+          state.onSessionCreated(data.sessionID ?? data.id, data.parentID)
           break
         case "session.step.started":
           state.onAgentUpdated(data.sessionID, data.agent)

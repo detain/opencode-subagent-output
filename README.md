@@ -42,10 +42,40 @@ The plugin imports `@opencode/plugin`, so it needs that package resolvable. Two 
 
 That is it. No other configuration is needed.
 
+### Running on OpenCode V2
+
+V2 changed the process model: `opencode run` is a thin **client** to a separate
+**server** process, and the plugin loads in that server. The server's stdout is
+`/dev/null`, and its stderr only reaches the terminal when the run is
+`--standalone` (a private child server) **and** `--print-logs` is set. The
+plugin detects V2 and writes its report lines to stderr accordingly.
+
+So on V2, run with:
+
+```sh
+SUBAGENT_REPORTER_ENABLED=1 opencode run "your prompt" \
+  --format default --standalone --print-logs
+```
+
+- `SUBAGENT_REPORTER_ENABLED=1` — required on V2. The server process is shared
+  with the TUI and cannot tell `run` mode from TUI mode, so reporting is opt-in.
+  (On V1 it is optional: `run` mode is auto-detected.)
+- `--standalone --print-logs` — required on V2 for the server's stderr to reach
+  your terminal. `--print-logs` also dumps the server's own log lines to
+  stderr; filter them with `grep -vE '^(timestamp=|\[SR)'` if you want only the
+  report. `--log-level none` does not help — the log lines bypass the level gate.
+- For `--format json`, also set `SUBAGENT_REPORTER_FORMAT=json` — the server
+  process cannot see the client's `--format` flag, so auto-detection is off and
+  the env var is the only way to get NDJSON `{"type":"subagent",...}` events.
+
 ### Environment variables
 
-- `SUBAGENT_REPORTER_FORMAT` — force `json` or `default` output (auto-detected from `--format json` otherwise).
-- `SUBAGENT_REPORTER_ENABLED` — force `1`/`true`/`on` to always report, or `0`/`false`/`off` to silence. By default it only reports in `opencode run` mode and stays silent in the TUI.
+- `SUBAGENT_REPORTER_FORMAT` — force `json` or `default` output. On V1 this is
+  auto-detected from `--format json`; on V2 the server process cannot see the
+  client flag, so set it explicitly for JSON output.
+- `SUBAGENT_REPORTER_ENABLED` — force `1`/`true`/`on` to always report, or
+  `0`/`false`/`off` to silence. On V1 it defaults to "report in `opencode run`
+  mode only, silent in the TUI". On V2 it defaults to off (opt-in required).
 
 ## Example output
 
