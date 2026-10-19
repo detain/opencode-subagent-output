@@ -18,57 +18,117 @@ When prompts fan out into multiple subagents, default CLI output can feel opaque
 
 ## Install
 
-The plugin imports `@opencode/plugin`, so it needs that package resolvable. Two options:
+**Option A — npm package (recommended):**
 
-**Option A — as an npm package (recommended for V2):**
+```sh
+npm i -g opencode-subagent-output
+```
 
-1. Add it to the `plugins` array in `~/.config/opencode/opencode.json` (V2) or `plugin` array (V1):
+This does two things automatically:
+
+1. Installs the plugin so OpenCode can load it.
+2. Runs a `postinstall` script that **detects your shell** (zsh / bash / fish /
+   PowerShell) and installs a `opencode()` shell function into your rc file
+   (`~/.zshrc`, `~/.bash_profile`, `~/.config/fish/config.fish`, or the
+   PowerShell profile). The function is what makes `--pipe-subagents` work —
+   see [How the shell function works](#how-the-shell-function-works).
+
+Then register the plugin with OpenCode. Add it to the `plugins` array in
+`~/.config/opencode/opencode.json` (V2) or `plugin` array (V1):
 
 ```json
 { "plugins": ["opencode-subagent-output"] }
 ```
 
-2. Run normally:
+Finally reload your shell:
 
-`opencode run "your prompt" --format default`
+```sh
+source ~/.zshrc   # or restart your terminal
+```
 
-**Option B — local file:**
+Now you can run:
 
-1. Put the plugin file at `~/.config/opencode/plugins/subagent-reporter.ts` (V2 discovers `plugins/`; V1 also reads `plugin/`).
-2. Make sure `@opencode/plugin` is installed where the file can resolve it (e.g. `npm i @opencode/plugin` in that directory).
-3. Run normally:
+```sh
+opencode run "your prompt" --pipe-subagents
+```
 
-`opencode run "your prompt" --format default`
+**Option B — local file (no npm):**
 
-That is it. No other configuration is needed.
+1. Put the plugin file at `~/.config/opencode/plugins/subagent-reporter.ts`
+   (V2 discovers `plugins/`; V1 also reads `plugin/`).
+2. Make sure `@opencode/plugin` is installed where the file can resolve it
+   (e.g. `npm i @opencode/plugin` in that directory).
+3. Manually add the shell function to your rc file (copy the block shown in
+   [How the shell function works](#how-the-shell-function-works)), replacing
+   `<package-dir>` with the directory that contains your copy of
+   `scripts/opencode-pipe-subagents.sh`.
+
+### Uninstall
+
+```sh
+npm rm -g opencode-subagent-output
+```
+
+The `preuninstall` hook removes the shell-function block from your rc file.
+Then remove the plugin entry from `opencode.json` and reload your shell.
+
+To remove just the shell function (keeping the package), run:
+
+```sh
+node <package-dir>/scripts/install.js uninstall
+```
+
+### How the shell function works
+
+The `postinstall` script appends a marker-delimited block to your rc file:
+
+```sh
+# >>> opencode-subagent-output >>>
+opencode() {
+  local a
+  for a in "$@"; do
+    if [ "$a" = "--pipe-subagents" ]; then
+      exec env OPENCODE_BIN="$(command -v opencode 2>/dev/null || echo "$HOME/.opencode/bin/opencode")" \
+        bash "<package-dir>/scripts/opencode-pipe-subagents.sh" "$@"
+    fi
+  done
+  command opencode "$@"
+}
+# <<< opencode-subagent-output <<<
+```
+
+It is a **function, not an alias** — an alias can't inspect its arguments. The
+function scans the args; if `--pipe-subagents` is present it `exec`s the
+wrapper script, otherwise it falls through to the real binary with
+`command opencode` (the `command` builtin skips the function, so there's no
+recursion). Re-running the installer is idempotent — it removes any existing
+block (including legacy markers) before appending a fresh one, so updates never
+duplicate it.
+
+This is the same interception pattern the `opentmux` plugin uses, except the
+arg-inspection lives in the shell function rather than a wrapper binary, so a
+plain `opencode` call has zero overhead.
 
 ### Running on OpenCode V2
 
 V2 changed the process model: `opencode run` is a thin **client** to a separate
 **server** process, and the plugin loads in that server. The server's stdout is
 `/dev/null`, so the plugin cannot write straight to your terminal the way it
-could on V1. Plugins also cannot add new CLI flags (the flag set is static in
-the binary). The clean solution is the bundled wrapper, which makes a
-`--pipe-subagents` flag work as if it were native:
+could on V1. The `--pipe-subagents` wrapper solves this:
 
-```sh
-scripts/opencode-pipe-subagents.sh "your prompt" --pipe-subagents
-```
+1. Strips `--pipe-subagents` from the args.
+2. Runs with `--standalone` so the server is a **child** of the run and
+   deterministically inherits `SUBAGENT_REPORTER_OUT` (the persistent
+   background daemon would not).
+3. Points the plugin at a temp file (`SUBAGENT_REPORTER_OUT`) — the one
+   transport that works from the server process, with no `--print-logs` and no
+   server log noise.
+4. Tails that file onto stdout in parallel with the run's own transcript.
+5. Cleans up and propagates the exit code.
 
-It strips `--pipe-subagents`, points the plugin at a temp file
-(`SUBAGENT_REPORTER_OUT`), and tails that file onto stdout in parallel with the
-run's own transcript. The file transport works from the server process in
-**default mode** — no `--standalone`, no `--print-logs`, no server log noise.
-It auto-detects `--format json` and emits NDJSON
-`{"type":"subagent",...}` events. Without `--pipe-subagents` it is a
-transparent pass-through to `opencode run`.
-
-Make it feel native with an alias (put in `~/.zshrc`):
-
-```sh
-alias opencode-pipe='scripts/opencode-pipe-subagents.sh'
-# then:  opencode-pipe "prompt" --pipe-subagents
-```
+It auto-detects `--format json` and emits NDJSON `{"type":"subagent",...}`
+events. Without `--pipe-subagents` the wrapper is a transparent pass-through to
+`opencode run`.
 
 If `opencode` is not on the wrapper's PATH, set `OPENCODE_BIN=/path/to/opencode`.
 
@@ -81,9 +141,9 @@ You can drive the plugin directly with environment variables:
 SUBAGENT_REPORTER_ENABLED=1 opencode run "your prompt" \
   --format default --standalone --print-logs 2>&1 | grep -vE '^timestamp='
 
-# Or to a file (works in default mode, no special flags):
+# Or to a file (use --standalone so the server inherits the env var):
 SUBAGENT_REPORTER_ENABLED=1 SUBAGENT_REPORTER_OUT=/tmp/subagents.txt \
-  opencode run "your prompt" --format default
+  opencode run "your prompt" --format default --standalone
 # then:  cat /tmp/subagents.txt
 ```
 
@@ -91,7 +151,7 @@ SUBAGENT_REPORTER_ENABLED=1 SUBAGENT_REPORTER_OUT=/tmp/subagents.txt \
   with the TUI and cannot tell `run` mode from TUI mode, so reporting is opt-in.
   (On V1 it is optional: `run` mode is auto-detected.)
 - `SUBAGENT_REPORTER_OUT=<file>` — write report lines to a file. The cleanest
-  V2 transport (default mode, no log noise). This is what the wrapper uses.
+  V2 transport (no log noise). This is what the wrapper uses.
 - Without a file, V2 writes to stderr, which only reaches the terminal under
   `--standalone --print-logs` (and that flag also dumps the server's own log
   lines — filter with `grep -vE '^timestamp='`).

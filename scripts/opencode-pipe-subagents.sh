@@ -8,11 +8,14 @@
 # is /dev/null. Plugins cannot add new CLI flags (the flag set is static in the
 # binary). So this wrapper:
 #   1. strips `--pipe-subagents` from the args,
-#   2. points the plugin at a temp file (SUBAGENT_REPORTER_OUT) — the one
-#      transport that works from the server process in DEFAULT mode (no
-#      --standalone, no --print-logs, no log noise),
-#   3. tails that file onto stdout in parallel with the run's own transcript,
-#   4. cleans up and propagates the exit code.
+#   2. runs with `--standalone` so the server is a CHILD of the run and
+#      deterministically inherits SUBAGENT_REPORTER_OUT (the persistent
+#      background daemon would not),
+#   3. points the plugin at a temp file (SUBAGENT_REPORTER_OUT) — the one
+#      transport that works from the server process (no --print-logs, no log
+#      noise),
+#   4. tails that file onto stdout in parallel with the run's own transcript,
+#   5. cleans up and propagates the exit code.
 #
 # Without `--pipe-subagents` it is a transparent pass-through to `opencode run`.
 #
@@ -64,11 +67,19 @@ fi
 tail -n +1 -f "$OUT" &
 TAIL_PID=$!
 
+# Run standalone so the server is a child of this run and inherits
+# SUBAGENT_REPORTER_OUT. Only add it if the user didn't already pass it.
+standalone_args=()
+for a in "${args[@]}"; do
+  if [ "$a" = "--standalone" ]; then standalone_args=(--standalone); fi
+done
+[ "${#standalone_args[@]}" -eq 0 ] && standalone_args=(--standalone)
+
 set +e
 SUBAGENT_REPORTER_ENABLED=1 \
 SUBAGENT_REPORTER_OUT="$OUT" \
 SUBAGENT_REPORTER_FORMAT="$fmt" \
-  "$OC" run "${args[@]}"
+  "$OC" run "${args[@]}" "${standalone_args[@]}"
 RC=$?
 set -e
 
