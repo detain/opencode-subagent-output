@@ -36,8 +36,19 @@ for a in "$@"; do
   args+=("$a")
 done
 
-# No flag: behave exactly like `opencode run`.
-if [ "$pipe" -ne 1 ]; then
+# Detect the major version so we only inject V2-only machinery on V2.
+# V1 (1.x) has no separate server process and does not understand
+# --standalone; its plugin adapter streams subagent output straight to stdout,
+# so on V1 we just run `opencode run` plainly (with or without
+# --pipe-subagents, which is stripped above). Defaults to 2 if undetectable.
+major=2
+ver="$("$OC" --version 2>/dev/null | head -n1 || true)"
+case "$ver" in
+  1.*) major=1 ;;
+esac
+
+# No flag, OR V1: behave exactly like `opencode run`.
+if [ "$pipe" -ne 1 ] || [ "$major" -eq 1 ]; then
   exec "$OC" run "${args[@]}"
 fi
 

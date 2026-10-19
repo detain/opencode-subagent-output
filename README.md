@@ -2,7 +2,14 @@
 
 A tiny OpenCode plugin that gives subagents a voice when run with `opencode run --format default`. Allows for better manual review when run attended or unattended.
 
-**Supports both OpenCode V1 and OpenCode V2 from a single file.** The plugin exports a V2 `Plugin.define({ id, setup })` definition plus a V1 `server()` method, so the same file loads on V2 (which reads `id`/`setup`) and on V1 `>= 1.18.29` (which calls `server()`). Each version's event stream is adapted to the shared reporting core, so output is identical on both.
+**Supports both OpenCode V1 and OpenCode V2 from a single file.** The plugin's
+default export carries both a V2 `{ id, setup }` shape and a V1 `server()`
+method, so the same file loads on V2 (which reads `id`/`setup`) and on V1
+`>= 1.18.29` (which calls `server()`). It detects which runtime it's in from
+the process argv (V2 loads plugins in the `serve` process, V1 runs them in the
+`run` process) — not from the `@opencode/plugin` package, which is V2-only.
+Each version's event stream is adapted to the shared reporting core, so output
+is identical on both. No external dependencies.
 
 ## What it does
 
@@ -51,8 +58,8 @@ opencode run "your prompt" --pipe-subagents
 **Option B — local file (no npm):**
 
 1. Put the plugin file at `~/.config/opencode/plugins/subagent-reporter.ts`
-   (V2 discovers `plugins/`; V1 also reads `plugin/`). OpenCode resolves
-   `@opencode/plugin` at runtime, so nothing else needs installing.
+   (V2 discovers `plugins/`; V1 also reads `plugin/`). The plugin has no
+   external dependencies, so nothing else needs installing.
 2. Manually add the shell function to your rc file (copy the block shown in
    [How the shell function works](#how-the-shell-function-works)), replacing
    `<package-dir>` with the directory that contains your copy of

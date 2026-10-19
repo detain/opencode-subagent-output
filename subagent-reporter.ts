@@ -13,7 +13,6 @@
  * event-shape adapters differ, because V2 renamed the event stream and moved the
  * payload from `event.properties` to `event.data`.
  */
-import { Plugin } from "@opencode/plugin"
 import { appendFileSync } from "node:fs"
 
 type SessionInfo = {
@@ -110,15 +109,28 @@ function isReportingEnabled(): boolean {
 }
 
 /**
- * True when we are loaded by OpenCode V2 (the server-process model). V2's
- * `@opencode/plugin` exposes `Plugin.define`; V1's does not.
+ * True when we are loaded by OpenCode V2 (the server-process model).
+ *
+ * V2 loads plugins in a SEPARATE `serve` process, so the plugin's argv
+ * contains `serve` (e.g. `serve --service`). V1 runs the plugin in the same
+ * process as `opencode run`, so its argv contains `run`. We detect from argv
+ * rather than from the `@opencode/plugin` package (which is a V2-only
+ * distribution and is not resolvable under V1 — importing it is what made the
+ * old package-based check always report V2).
  */
 function isV2(): boolean {
-  try {
-    return typeof (Plugin as any)?.define === "function"
-  } catch {
+  const argv = Array.isArray(process.argv) ? process.argv : []
+  const joined = argv.join(" ")
+  // V2 server process: argv has `serve` and no `run`.
+  if (joined.includes("serve")) {
+    return true
+  }
+  // V1 run process: argv has `run`.
+  if (joined.includes(" run ")) {
     return false
   }
+  // Default: assume V2 (the current distribution) when undecidable.
+  return true
 }
 
 /**
@@ -564,13 +576,13 @@ function v2Setup(ctx: any) {
   return () => controller.abort()
 }
 
-// V2 default export: `id` + `setup` (from Plugin.define) plus the V1 `server()`
-// method. V2 reads `id`/`setup` and ignores `server()`; V1 (>= 1.18.29) calls
-// `server()` and ignores `setup`.
+// Default export. V2 reads `id`/`setup` and ignores `server()`; V1 (>=
+// 1.18.29) calls `server()` and ignores `setup`. (`Plugin.define` from
+// @opencode/plugin is a no-op identity function, so we spread the object
+// directly — no import needed, and importing the V2-only package is what
+// broke V1 detection.)
 export default {
-  ...Plugin.define({
-    id: "subagent-reporter",
-    setup: v2Setup,
-  }),
+  id: "subagent-reporter",
+  setup: v2Setup,
   server: () => v1Hooks(),
 }

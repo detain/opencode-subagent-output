@@ -82,7 +82,7 @@ function resolvePluginFile() {
 // config `plugins` array does NOT auto-load on V2 — the documented, reliable
 // mechanism is the discovery dir `~/.config/opencode/plugins/`. We symlink
 // (single source of truth = the package file) and fall back to a copy.
-// OpenCode resolves `@opencode/plugin` at runtime, so nothing else is needed.
+// The plugin has no external dependencies, so nothing else is needed.
 function installPluginFile() {
   const src = resolvePluginFile();
   if (!src) {
