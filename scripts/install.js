@@ -71,6 +71,55 @@ function resolveWrapperScript() {
   return fs.existsSync(script) ? script : null;
 }
 
+// The plugin file that ships with this package (sibling of scripts/).
+function resolvePluginFile() {
+  const plugin = path.join(__dirname, "..", "subagent-reporter.ts");
+  return fs.existsSync(plugin) ? plugin : null;
+}
+
+// Place the plugin into OpenCode's GLOBAL discovery directory so it loads in
+// every project without per-project config. A bare absolute path in the
+// config `plugins` array does NOT auto-load on V2 — the documented, reliable
+// mechanism is the discovery dir `~/.config/opencode/plugins/`. We symlink
+// (single source of truth = the package file) and fall back to a copy.
+// OpenCode resolves `@opencode/plugin` at runtime, so nothing else is needed.
+function installPluginFile() {
+  const src = resolvePluginFile();
+  if (!src) {
+    console.warn("   ⚠️  Plugin file (subagent-reporter.ts) not found; skipping.");
+    return;
+  }
+  const destDir = path.join(os.homedir(), ".config", "opencode", "plugins");
+  fs.mkdirSync(destDir, { recursive: true });
+  const dest = path.join(destDir, "subagent-reporter.ts");
+  try {
+    if (fs.existsSync(dest) || fs.lstatSync(dest, { throwIfNoEntry: false })) {
+      fs.rmSync(dest);
+    }
+    fs.symlinkSync(src, dest);
+    console.log(`   ✓ Plugin linked into global discovery dir: ${dest}`);
+  } catch {
+    try {
+      fs.copyFileSync(src, dest);
+      console.log(`   ✓ Plugin copied into global discovery dir: ${dest}`);
+    } catch (err) {
+      console.warn(`   ⚠️  Could not install plugin file: ${err.message}`);
+    }
+  }
+}
+
+function removePluginFile() {
+  const dest = path.join(os.homedir(), ".config", "opencode", "plugins", "subagent-reporter.ts");
+  try {
+    if (fs.existsSync(dest) || fs.lstatSync(dest, { throwIfNoEntry: false })) {
+      fs.rmSync(dest);
+      console.log(`   ✓ Removed plugin from global discovery dir: ${dest}`);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 function functionBlock(shellName, scriptPath) {
   if (shellName === "powershell") {
     return `
@@ -150,6 +199,11 @@ function install() {
   fs.writeFileSync(shell.rcFile, content, "utf-8");
 
   console.log("   ✓ Shell function installed.");
+
+  // Also make the plugin load globally (discovery dir), so no per-project
+  // config is needed.
+  installPluginFile();
+
   console.log("");
   console.log("   To activate now:  source " + shell.rcFile);
   console.log("   (or restart your terminal)");
@@ -182,6 +236,10 @@ function uninstall() {
   } else {
     console.log("   No installed block found — nothing to remove.");
   }
+
+  // Remove the plugin from the global discovery dir too.
+  removePluginFile();
+
   console.log("");
 }
 

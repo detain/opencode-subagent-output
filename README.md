@@ -24,23 +24,19 @@ When prompts fan out into multiple subagents, default CLI output can feel opaque
 npm i -g opencode-subagent-output
 ```
 
-This does two things automatically:
+This does everything automatically:
 
-1. Installs the plugin so OpenCode can load it.
+1. **Installs the plugin** into OpenCode's global discovery directory
+   (`~/.config/opencode/plugins/`), so it loads in every project with no
+   per-project config. (A bare path in the config `plugins` array does not
+   auto-load on V2 — the discovery dir is the documented, reliable mechanism.)
 2. Runs a `postinstall` script that **detects your shell** (zsh / bash / fish /
-   PowerShell) and installs a `opencode()` shell function into your rc file
+   PowerShell) and installs an `opencode()` shell function into your rc file
    (`~/.zshrc`, `~/.bash_profile`, `~/.config/fish/config.fish`, or the
    PowerShell profile). The function is what makes `--pipe-subagents` work —
    see [How the shell function works](#how-the-shell-function-works).
 
-Then register the plugin with OpenCode. Add it to the `plugins` array in
-`~/.config/opencode/opencode.json` (V2) or `plugin` array (V1):
-
-```json
-{ "plugins": ["opencode-subagent-output"] }
-```
-
-Finally reload your shell:
+Then reload your shell:
 
 ```sh
 source ~/.zshrc   # or restart your terminal
@@ -55,10 +51,9 @@ opencode run "your prompt" --pipe-subagents
 **Option B — local file (no npm):**
 
 1. Put the plugin file at `~/.config/opencode/plugins/subagent-reporter.ts`
-   (V2 discovers `plugins/`; V1 also reads `plugin/`).
-2. Make sure `@opencode/plugin` is installed where the file can resolve it
-   (e.g. `npm i @opencode/plugin` in that directory).
-3. Manually add the shell function to your rc file (copy the block shown in
+   (V2 discovers `plugins/`; V1 also reads `plugin/`). OpenCode resolves
+   `@opencode/plugin` at runtime, so nothing else needs installing.
+2. Manually add the shell function to your rc file (copy the block shown in
    [How the shell function works](#how-the-shell-function-works)), replacing
    `<package-dir>` with the directory that contains your copy of
    `scripts/opencode-pipe-subagents.sh`.
@@ -69,10 +64,11 @@ opencode run "your prompt" --pipe-subagents
 npm rm -g opencode-subagent-output
 ```
 
-The `preuninstall` hook removes the shell-function block from your rc file.
-Then remove the plugin entry from `opencode.json` and reload your shell.
+The `preuninstall` hook removes the shell-function block from your rc file and
+the plugin from the global discovery dir (`~/.config/opencode/plugins/`), then
+you just reload your shell.
 
-To remove just the shell function (keeping the package), run:
+To remove just the shell function and plugin (keeping the package), run:
 
 ```sh
 node <package-dir>/scripts/install.js uninstall
